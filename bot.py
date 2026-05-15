@@ -5,6 +5,7 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest
 
 from config import BOT_TOKEN, GOAL, MEMBERS
 from storage import load_data, save_data
@@ -42,9 +43,10 @@ def parse_message(text: str) -> dict:
             result["total"] += count
             result["lines"].append((line, count))
 
-    text_lower = text.lower()
+    # Ищем имя участника только в первых 3 строках, чтобы избежать ложных срабатываний
+    first_lines = "\n".join(lines[:3]).lower()
     for member in get_all_members():
-        if member.lower() in text_lower:
+        if member.lower() in first_lines:
             result["name"] = member
             break
 
@@ -82,6 +84,31 @@ def format_summary(day_data: dict, date: str) -> str:
     return "\n".join(lines)
 
 
+async def delete_previous_summary(chat_id: int, date: str):
+    """Удаляет предыдущее сообщение-сводку бота для данной даты."""
+    data = load_data()
+    bot_messages = data.get("bot_messages", {})
+    key = f"{chat_id}:{date}"
+
+    if key in bot_messages:
+        old_msg_id = bot_messages[key]
+        try:
+            await bot.delete_message(chat_id, old_msg_id)
+            logger.info(f"[DELETE] Удалено старое сообщение {old_msg_id} в чате {chat_id}")
+        except TelegramBadRequest as e:
+            # Сообщение уже удалено или слишком старое — не страшно
+            logger.info(f"[DELETE] Не удалось удалить сообщение {old_msg_id}: {e}")
+
+
+async def save_bot_message(chat_id: int, date: str, message_id: int):
+    """Сохраняет ID последнего сообщения-сводки бота."""
+    data = load_data()
+    data.setdefault("bot_messages", {})
+    key = f"{chat_id}:{date}"
+    data["bot_messages"][key] = message_id
+    save_data(data)
+
+
 async def process_any_message(message: Message):
     text = message.text or message.caption or ""
     logger.info(f"[MSG] chat={message.chat.id} type={message.chat.type} text={text[:80]!r}")
@@ -113,7 +140,15 @@ async def process_any_message(message: Message):
     summary_text = format_summary(data["days"][date], date)
 
     try:
-        await bot.send_message(message.chat.id, summary_text, parse_mode="Markdown")
+        # Сначала удаляем старую сводку
+        await delete_previous_summary(message.chat.id, date)
+
+        # Отправляем новую сводку
+        sent = await bot.send_message(message.chat.id, summary_text, parse_mode="Markdown")
+
+        # Запоминаем ID новой сводки
+        await save_bot_message(message.chat.id, date, sent.message_id)
+
         logger.info(f"[OK] Сводка отправлена: {parsed['name']} = {parsed['total']}")
     except Exception as e:
         logger.error(f"[ERR] Не удалось отправить: {e}")
@@ -186,7 +221,6 @@ async def cmd_removemember(message: Message):
         return
     name = args[1].strip()
 
-    # Нельзя удалить участника из config.py напрямую
     if name in MEMBERS:
         await message.answer(
             f"❗ {name} указан в config.py — удали его оттуда вручную и перезапусти бота."
