@@ -1,0 +1,20 @@
+{
+  "days": {
+    "15.05.26": {
+      "Рашид": {
+        "total": 68,
+        "message_id": 11,
+        "updated_at": "2026-05-15T04:05:28.809536"
+      },
+      "Рашид\n/addmember Давид\n/addmember Анри\n/addmember Андреас\n/addmember Ислам\n/addmember Казбек\n/addmember Руслан": {
+        "total": 0,
+        "message_id": 48,
+        "updated_at": "2026-05-15T04:05:33.018613"
+      }
+    }
+  },
+  "members": [
+    "Рашид\n/addmember Давид\n/addmember Анри\n/addmember Андреас\n/addmember Ислам\n/addmember Казбек\n/addmember Руслан",
+    "Рашид"
+  ]
+}
