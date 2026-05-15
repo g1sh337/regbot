@@ -3,8 +3,6 @@ import re
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
-TZ = ZoneInfo("Europe/Moscow")
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.filters import Command
@@ -15,6 +13,8 @@ from storage import load_data, save_data
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+TZ = ZoneInfo("Europe/Moscow")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -92,15 +92,15 @@ def format_summary(day_data: dict, date: str) -> str:
     return "\n".join(lines)
 
 
-async def update_summary(chat_id: int, date: str, summary_text: str):
+async def update_summary(chat_id: int, summary_text: str):
     """
-    Редактирует существующее сообщение-сводку.
-    Если его нет или оно удалено — отправляет новое и запоминает ID.
+    Одно сообщение-сводка на весь канал.
+    Редактирует его при каждом обновлении.
+    Если удалено — создаёт новое.
     """
     data = load_data()
-    bot_messages = data.get("bot_messages", {})
-    key = f"{chat_id}:{date}"
-    existing_msg_id = bot_messages.get(key)
+    key = f"summary:{chat_id}"
+    existing_msg_id = data.get("bot_messages", {}).get(key)
 
     if existing_msg_id:
         try:
@@ -115,7 +115,7 @@ async def update_summary(chat_id: int, date: str, summary_text: str):
         except TelegramBadRequest as e:
             logger.warning(f"[EDIT] Не удалось отредактировать: {e}")
 
-    # Отправляем новое сообщение если старого нет
+    # Создаём новое если старого нет
     sent = await bot.send_message(chat_id, summary_text, parse_mode="Markdown")
     data = load_data()
     data.setdefault("bot_messages", {})[key] = sent.message_id
@@ -141,20 +141,20 @@ async def process_any_message(message: Message):
         logger.info(f"[SKIP] {parsed['name']} не в списке")
         return
 
-    date = parsed["date"] or datetime.now().strftime("%d.%m.%y")
+    date = parsed["date"] or datetime.now(TZ).strftime("%d.%m.%y")
 
     data = load_data()
     data.setdefault("days", {}).setdefault(date, {})[parsed["name"]] = {
         "total": parsed["total"],
         "message_id": message.message_id,
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": datetime.now(TZ).isoformat(),
     }
     save_data(data)
 
     summary_text = format_summary(data["days"][date], date)
 
     try:
-        await update_summary(message.chat.id, date, summary_text)
+        await update_summary(message.chat.id, summary_text)
         logger.info(f"[OK] {parsed['name']} = {parsed['total']}")
     except Exception as e:
         logger.error(f"[ERR] {e}")
@@ -189,7 +189,7 @@ async def cmd_test(message: Message):
 @dp.message(Command("summary"))
 async def cmd_summary(message: Message):
     data = load_data()
-    today = datetime.now().strftime("%d.%m.%y")
+    today = datetime.now(TZ).strftime("%d.%m.%y")
     today_data = data.get("days", {}).get(today, {})
     await message.answer(format_summary(today_data, today), parse_mode="Markdown")
 
@@ -197,7 +197,7 @@ async def cmd_summary(message: Message):
 @dp.message(Command("members"))
 async def cmd_members(message: Message):
     members = get_all_members()
-    await message.answer("👥 Участников:\n" + "\n".join(f"• {m}" for m in members))
+    await message.answer("👥 Участники:\n" + "\n".join(f"• {m}" for m in members))
 
 
 @dp.message(Command("addmember"))
@@ -248,7 +248,7 @@ async def cmd_reset(message: Message):
         await message.answer("❗ Только администраторы могут сбрасывать счётчики.")
         return
     data = load_data()
-    today = datetime.now().strftime("%d.%m.%y")
+    today = datetime.now(TZ).strftime("%d.%m.%y")
     data.setdefault("days", {})[today] = {}
     save_data(data)
     await message.answer(f"🔄 Счётчики на {today} сброшены.")
