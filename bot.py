@@ -2,6 +2,9 @@ import asyncio
 import re
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo("Europe/Moscow")
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.filters import Command
@@ -67,7 +70,7 @@ def get_status_emoji(total: int, goal: int) -> str:
 
 def format_summary(day_data: dict, date: str) -> str:
     members = get_all_members()
-    now = datetime.now().strftime("%H:%M")
+    now = datetime.now(TZ).strftime("%H:%M")
     lines = [
         f"📊 *Отчёт по регистрациям* — {date}",
         f"🎯 Цель: {GOAL} рег/день",
