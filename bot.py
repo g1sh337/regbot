@@ -172,6 +172,7 @@ async def cmd_start(message: Message):
         "/addmember Имя — добавить участника\n"
         "/removemember Имя — удалить участника\n"
         "/reset — сбросить счётчики (админ)\n"
+        "/resetmsg — сбросить ID сводки (если задвоилась)\n"
         "/test — проверка связи"
     )
 
@@ -252,6 +253,19 @@ async def cmd_reset(message: Message):
     data.setdefault("days", {})[today] = {}
     save_data(data)
     await message.answer(f"🔄 Счётчики на {today} сброшены.")
+
+
+@dp.message(Command("resetmsg"))
+async def cmd_resetmsg(message: Message):
+    data = load_data()
+    data["bot_messages"] = {}
+    save_data(data)
+    await message.answer(
+        "✅ ID сводок сброшены.\n"
+        "Удали лишние сообщения-сводки из канала вручную, "
+        "затем попроси любого участника отредактировать своё сообщение — "
+        "бот создаст одно новое сообщение и будет редактировать только его."
+    )
 
 
 # ── Хендлеры сообщений ───────────────────────────────
