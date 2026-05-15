@@ -18,7 +18,6 @@ dp = Dispatcher()
 
 
 def get_all_members() -> list:
-    """Возвращает объединённый список участников из config.py и базы данных."""
     data = load_data()
     saved_members = data.get("members", [])
     return list(MEMBERS) + [m for m in saved_members if m not in MEMBERS]
@@ -43,7 +42,7 @@ def parse_message(text: str) -> dict:
             result["total"] += count
             result["lines"].append((line, count))
 
-    # Ищем имя участника только в первых 3 строках, чтобы избежать ложных срабатываний
+    # Ищем имя только в первых 3 строках
     first_lines = "\n".join(lines[:3]).lower()
     for member in get_all_members():
         if member.lower() in first_lines:
@@ -68,7 +67,13 @@ def get_status_emoji(total: int, goal: int) -> str:
 
 def format_summary(day_data: dict, date: str) -> str:
     members = get_all_members()
-    lines = [f"📊 *Отчёт по регистрациям* — {date}", f"🎯 Цель: {GOAL} рег/день", ""]
+    now = datetime.now().strftime("%H:%M")
+    lines = [
+        f"📊 *Отчёт по регистрациям* — {date}",
+        f"🎯 Цель: {GOAL} рег/день",
+        f"🕐 Обновлено: {now}",
+        "",
+    ]
 
     total_all = 0
     for member in members:
@@ -84,29 +89,35 @@ def format_summary(day_data: dict, date: str) -> str:
     return "\n".join(lines)
 
 
-async def delete_previous_summary(chat_id: int, date: str):
-    """Удаляет предыдущее сообщение-сводку бота для данной даты."""
+async def update_summary(chat_id: int, date: str, summary_text: str):
+    """
+    Редактирует существующее сообщение-сводку.
+    Если его нет или оно удалено — отправляет новое и запоминает ID.
+    """
     data = load_data()
     bot_messages = data.get("bot_messages", {})
     key = f"{chat_id}:{date}"
+    existing_msg_id = bot_messages.get(key)
 
-    if key in bot_messages:
-        old_msg_id = bot_messages[key]
+    if existing_msg_id:
         try:
-            await bot.delete_message(chat_id, old_msg_id)
-            logger.info(f"[DELETE] Удалено старое сообщение {old_msg_id} в чате {chat_id}")
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=existing_msg_id,
+                text=summary_text,
+                parse_mode="Markdown",
+            )
+            logger.info(f"[EDIT] Сводка обновлена (msg_id={existing_msg_id})")
+            return
         except TelegramBadRequest as e:
-            # Сообщение уже удалено или слишком старое — не страшно
-            logger.info(f"[DELETE] Не удалось удалить сообщение {old_msg_id}: {e}")
+            logger.warning(f"[EDIT] Не удалось отредактировать: {e}")
 
-
-async def save_bot_message(chat_id: int, date: str, message_id: int):
-    """Сохраняет ID последнего сообщения-сводки бота."""
+    # Отправляем новое сообщение если старого нет
+    sent = await bot.send_message(chat_id, summary_text, parse_mode="Markdown")
     data = load_data()
-    data.setdefault("bot_messages", {})
-    key = f"{chat_id}:{date}"
-    data["bot_messages"][key] = message_id
+    data.setdefault("bot_messages", {})[key] = sent.message_id
     save_data(data)
+    logger.info(f"[SEND] Новая сводка отправлена (msg_id={sent.message_id})")
 
 
 async def process_any_message(message: Message):
@@ -140,18 +151,10 @@ async def process_any_message(message: Message):
     summary_text = format_summary(data["days"][date], date)
 
     try:
-        # Сначала удаляем старую сводку
-        await delete_previous_summary(message.chat.id, date)
-
-        # Отправляем новую сводку
-        sent = await bot.send_message(message.chat.id, summary_text, parse_mode="Markdown")
-
-        # Запоминаем ID новой сводки
-        await save_bot_message(message.chat.id, date, sent.message_id)
-
-        logger.info(f"[OK] Сводка отправлена: {parsed['name']} = {parsed['total']}")
+        await update_summary(message.chat.id, date, summary_text)
+        logger.info(f"[OK] {parsed['name']} = {parsed['total']}")
     except Exception as e:
-        logger.error(f"[ERR] Не удалось отправить: {e}")
+        logger.error(f"[ERR] {e}")
 
 
 # ── Команды ──────────────────────────────────────────
@@ -191,7 +194,7 @@ async def cmd_summary(message: Message):
 @dp.message(Command("members"))
 async def cmd_members(message: Message):
     members = get_all_members()
-    await message.answer("👥 Участники:\n" + "\n".join(f"• {m}" for m in members))
+    await message.answer("👥 Участников:\n" + "\n".join(f"• {m}" for m in members))
 
 
 @dp.message(Command("addmember"))
@@ -201,8 +204,7 @@ async def cmd_addmember(message: Message):
         await message.answer("Использование: /addmember Имя")
         return
     name = args[1].strip()
-    members = get_all_members()
-    if name in members:
+    if name in get_all_members():
         await message.answer(f"❗ {name} уже в списке.")
         return
     data = load_data()
@@ -220,13 +222,11 @@ async def cmd_removemember(message: Message):
         await message.answer("Использование: /removemember Имя")
         return
     name = args[1].strip()
-
     if name in MEMBERS:
         await message.answer(
             f"❗ {name} указан в config.py — удали его оттуда вручную и перезапусти бота."
         )
         return
-
     data = load_data()
     saved = data.get("members", [])
     if name not in saved:
