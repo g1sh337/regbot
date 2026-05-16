@@ -3,7 +3,7 @@
 # ==========================================
 
 # Токен бота от @BotFather
-BOT_TOKEN = "8845825717:AAFLDfkeZn8ontsfPEESUdMFseLkACnOBrw"
+BOT_TOKEN = "8845825717:AAHhVpkzXliam0V2uVnJu-GEwhgayN_qTC4"
 
 # Цель регистраций в день для каждого участника
 GOAL = 50
@@ -17,4 +17,5 @@ MEMBERS = [
     "Казбек",
     "Рашид",
     "Руслан",
+    "Мансур",
 ]
