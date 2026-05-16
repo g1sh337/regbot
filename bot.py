@@ -3,8 +3,9 @@ import re
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, Update
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 
@@ -15,6 +16,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TZ = ZoneInfo("Europe/Moscow")
+
+WEBHOOK_HOST = "https://regbot-production.up.railway.app"
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+PORT = 8080
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -45,7 +51,6 @@ def parse_message(text: str) -> dict:
             result["total"] += count
             result["lines"].append((line, count))
 
-    # Ищем имя только в первых 3 строках
     first_lines = "\n".join(lines[:3]).lower()
     for member in get_all_members():
         if member.lower() in first_lines:
@@ -92,12 +97,89 @@ def format_summary(day_data: dict, date: str) -> str:
     return "\n".join(lines)
 
 
+def format_stats(name: str) -> str:
+    data = load_data()
+    days = data.get("days", {})
+
+    history = []
+    for date, day_data in days.items():
+        if name in day_data:
+            total = day_data[name].get("total", 0)
+            history.append((date, total))
+
+    if not history:
+        return f"❗ Нет данных по участнику *{name}*"
+
+    def parse_date(d):
+        try:
+            return datetime.strptime(d, "%d.%m.%y")
+        except:
+            try:
+                return datetime.strptime(d, "%d.%m.%Y")
+            except:
+                return datetime.min
+
+    history.sort(key=lambda x: parse_date(x[0]), reverse=True)
+
+    totals = [t for _, t in history]
+    days_count = len(history)
+    days_goal = sum(1 for t in totals if t >= GOAL)
+    avg = round(sum(totals) / days_count)
+    best = max(history, key=lambda x: x[1])
+    worst = min(history, key=lambda x: x[1])
+
+    lines = [
+        f"📈 *Статистика — {name}*",
+        "",
+        f"📅 Дней в базе: {days_count}",
+        f"✅ Выполнил цель: {days_goal} дн.",
+        f"📊 Среднее в день: {avg}",
+        f"🏆 Лучший день: {best[1]} ({best[0]})",
+        f"📉 Худший день: {worst[1]} ({worst[0]})",
+        "",
+        "──────────────",
+        f"*Последние {min(10, days_count)} дней:*",
+    ]
+
+    for date, total in history[:10]:
+        emoji = get_status_emoji(total, GOAL)
+        lines.append(f"{emoji} {date} — {total}")
+
+    return "\n".join(lines)
+
+
+def format_top() -> str:
+    data = load_data()
+    days = data.get("days", {})
+    members = get_all_members()
+
+    totals = {}
+    days_count = {}
+    for date, day_data in days.items():
+        for member in members:
+            if member in day_data:
+                totals[member] = totals.get(member, 0) + day_data[member].get("total", 0)
+                days_count[member] = days_count.get(member, 0) + 1
+
+    if not totals:
+        return "❗ Нет данных для рейтинга"
+
+    ranked = sorted(members, key=lambda m: totals.get(m, 0), reverse=True)
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 *Рейтинг за всё время*", ""]
+
+    for i, member in enumerate(ranked):
+        total = totals.get(member, 0)
+        days_n = days_count.get(member, 0)
+        avg = round(total / days_n) if days_n else 0
+        medal = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{medal} {member} — {total} рег. ({days_n} дн., ср. {avg}/день)")
+
+    return "\n".join(lines)
+
+
 async def update_summary(chat_id: int, summary_text: str):
-    """
-    Одно сообщение-сводка на весь канал.
-    Редактирует его при каждом обновлении.
-    Если удалено — создаёт новое.
-    """
     data = load_data()
     key = f"summary:{chat_id}"
     existing_msg_id = data.get("bot_messages", {}).get(key)
@@ -115,7 +197,6 @@ async def update_summary(chat_id: int, summary_text: str):
         except TelegramBadRequest as e:
             logger.warning(f"[EDIT] Не удалось отредактировать: {e}")
 
-    # Создаём новое если старого нет
     sent = await bot.send_message(chat_id, summary_text, parse_mode="Markdown")
     data = load_data()
     data.setdefault("bot_messages", {})[key] = sent.message_id
@@ -125,8 +206,6 @@ async def update_summary(chat_id: int, summary_text: str):
 
 async def process_any_message(message: Message):
     text = message.text or message.caption or ""
-    logger.info(f"[MSG] chat={message.chat.id} type={message.chat.type} text={text[:80]!r}")
-
     if not text:
         return
 
@@ -134,11 +213,8 @@ async def process_any_message(message: Message):
     logger.info(f"[PARSE] name={parsed['name']} total={parsed['total']} date={parsed['date']}")
 
     if not parsed["name"]:
-        logger.info("[SKIP] Имя участника не найдено")
         return
-
     if parsed["name"] not in get_all_members():
-        logger.info(f"[SKIP] {parsed['name']} не в списке")
         return
 
     date = parsed["date"] or datetime.now(TZ).strftime("%d.%m.%y")
@@ -168,11 +244,13 @@ async def cmd_start(message: Message):
         "👋 Бот учёта регистраций запущен!\n\n"
         "Команды:\n"
         "/summary — текущая сводка\n"
+        "/stats Имя — статистика участника\n"
+        "/top — рейтинг всех участников\n"
         "/members — список участников\n"
         "/addmember Имя — добавить участника\n"
         "/removemember Имя — удалить участника\n"
         "/reset — сбросить счётчики (админ)\n"
-        "/resetmsg — сбросить ID сводки (если задвоилась)\n"
+        "/resetmsg — сбросить ID сводки\n"
         "/test — проверка связи"
     )
 
@@ -193,6 +271,30 @@ async def cmd_summary(message: Message):
     today = datetime.now(TZ).strftime("%d.%m.%y")
     today_data = data.get("days", {}).get(today, {})
     await message.answer(format_summary(today_data, today), parse_mode="Markdown")
+
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        members = get_all_members()
+        await message.answer(
+            "Использование: /stats Имя\n\n"
+            "Участники:\n" + "\n".join(f"• {m}" for m in members)
+        )
+        return
+    name = args[1].strip()
+    members = get_all_members()
+    matched = next((m for m in members if m.lower() == name.lower()), None)
+    if not matched:
+        await message.answer(f"❗ Участник *{name}* не найден.", parse_mode="Markdown")
+        return
+    await message.answer(format_stats(matched), parse_mode="Markdown")
+
+
+@dp.message(Command("top"))
+async def cmd_top(message: Message):
+    await message.answer(format_top(), parse_mode="Markdown")
 
 
 @dp.message(Command("members"))
@@ -260,12 +362,7 @@ async def cmd_resetmsg(message: Message):
     data = load_data()
     data["bot_messages"] = {}
     save_data(data)
-    await message.answer(
-        "✅ ID сводок сброшены.\n"
-        "Удали лишние сообщения-сводки из канала вручную, "
-        "затем попроси любого участника отредактировать своё сообщение — "
-        "бот создаст одно новое сообщение и будет редактировать только его."
-    )
+    await message.answer("✅ ID сводок сброшены.")
 
 
 # ── Хендлеры сообщений ───────────────────────────────
@@ -287,12 +384,38 @@ async def on_edited_channel_post(message: Message):
     await process_any_message(message)
 
 
+# ── Webhook ───────────────────────────────────────────
+
+async def handle_webhook(request: web.Request) -> web.Response:
+    data = await request.json()
+    update = Update.model_validate(data)
+    await dp.feed_update(bot, update)
+    return web.Response(text="OK")
+
+
+async def on_startup():
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+
+
+async def on_shutdown():
+    await bot.delete_webhook()
+    logger.info("Webhook удалён")
+
+
 async def main():
-    logger.info("Бот запущен...")
-    await dp.start_polling(bot, allowed_updates=[
-        "message", "edited_message",
-        "channel_post", "edited_channel_post"
-    ])
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.on_startup.append(lambda _: on_startup())
+    app.on_shutdown.append(lambda _: on_shutdown())
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Бот запущен на порту {PORT}")
+
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
