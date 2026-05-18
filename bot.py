@@ -5,7 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, Update
+from aiogram.types import Message, Update, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
 
@@ -32,8 +32,24 @@ def get_all_members() -> list:
     return list(MEMBERS) + [m for m in saved_members if m not in MEMBERS]
 
 
+def parse_country(line: str) -> str | None:
+    """Извлекает название страны из строки."""
+    # Убираем название продукта в начале и число в конце
+    # Пример: "мобилка казино россия 🇷🇺 - 11" -> "россия 🇷🇺"
+    line = line.strip()
+    # Убираем число в конце
+    line = re.sub(r'\s*-\s*\d+\s*$', '', line)
+    # Убираем "мобилка казино(N)" или "мобилка казино" в начале
+    line = re.sub(r'^мобилка\s+казино(\(\d+\))?\s*', '', line, flags=re.IGNORECASE)
+    line = line.strip()
+    if line:
+        # Нормализуем: первая буква заглавная
+        return line[0].upper() + line[1:] if line else None
+    return None
+
+
 def parse_message(text: str) -> dict:
-    result = {"name": None, "date": None, "total": 0, "lines": []}
+    result = {"name": None, "date": None, "total": 0, "lines": [], "countries": {}}
     lines = text.strip().split("\n")
 
     for line in lines:
@@ -50,6 +66,11 @@ def parse_message(text: str) -> dict:
             count = int(match.group(1))
             result["total"] += count
             result["lines"].append((line, count))
+
+            # Парсим страну
+            country = parse_country(line)
+            if country and count > 0:
+                result["countries"][country] = result["countries"].get(country, 0) + count
 
     first_lines = "\n".join(lines[:3]).lower()
     for member in get_all_members():
@@ -73,6 +94,18 @@ def get_status_emoji(total: int, goal: int) -> str:
         return "🔴"
 
 
+def get_country_summary(day_data: dict) -> dict:
+    """Суммирует регистрации по странам за день."""
+    country_totals = {}
+    for member, info in day_data.items():
+        if not isinstance(info, dict):
+            continue
+        countries = info.get("countries", {})
+        for country, count in countries.items():
+            country_totals[country] = country_totals.get(country, 0) + count
+    return country_totals
+
+
 def format_summary(day_data: dict, date: str) -> str:
     members = get_all_members()
     now = datetime.now(TZ).strftime("%H:%M")
@@ -93,6 +126,53 @@ def format_summary(day_data: dict, date: str) -> str:
     lines.append("")
     lines.append("──────────────")
     lines.append(f"📈 Итого: {total_all}/{GOAL * len(members)}")
+
+    # Страны
+    country_totals = get_country_summary(day_data)
+    if country_totals:
+        lines.append("")
+        lines.append("🌍 *По странам:*")
+        sorted_countries = sorted(country_totals.items(), key=lambda x: x[1], reverse=True)
+        for country, count in sorted_countries:
+            if count > 0:
+                lines.append(f"  {country} — {count}")
+
+    return "\n".join(lines)
+
+
+def make_member_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки для каждого участника."""
+    members = get_all_members()
+    buttons = []
+    row = []
+    for i, member in enumerate(members):
+        row.append(InlineKeyboardButton(
+            text=f"🔍 {member}",
+            callback_data=f"detail:{member}"
+        ))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def format_member_detail(name: str, date: str, day_data: dict) -> str:
+    """Детализация по странам для участника."""
+    member_data = day_data.get(name, {})
+    countries = member_data.get("countries", {})
+    total = member_data.get("total", 0)
+
+    lines = [f"📋 *{name}* — {date}", f"Итого: {total}/{GOAL}", ""]
+
+    if countries:
+        sorted_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)
+        for country, count in sorted_countries:
+            emoji = "✅" if count > 0 else "➖"
+            lines.append(f"{emoji} {country} — {count}")
+    else:
+        lines.append("Нет данных по странам")
 
     return "\n".join(lines)
 
@@ -165,7 +245,6 @@ def format_top() -> str:
         return "❗ Нет данных для рейтинга"
 
     ranked = sorted(members, key=lambda m: totals.get(m, 0), reverse=True)
-
     medals = ["🥇", "🥈", "🥉"]
     lines = ["🏆 *Рейтинг за всё время*", ""]
 
@@ -183,6 +262,7 @@ async def update_summary(chat_id: int, summary_text: str):
     data = load_data()
     key = f"summary:{chat_id}"
     existing_msg_id = data.get("bot_messages", {}).get(key)
+    keyboard = make_member_keyboard()
 
     if existing_msg_id:
         try:
@@ -191,13 +271,14 @@ async def update_summary(chat_id: int, summary_text: str):
                 message_id=existing_msg_id,
                 text=summary_text,
                 parse_mode="Markdown",
+                reply_markup=keyboard,
             )
             logger.info(f"[EDIT] Сводка обновлена (msg_id={existing_msg_id})")
             return
         except TelegramBadRequest as e:
             logger.warning(f"[EDIT] Не удалось отредактировать: {e}")
 
-    sent = await bot.send_message(chat_id, summary_text, parse_mode="Markdown")
+    sent = await bot.send_message(chat_id, summary_text, parse_mode="Markdown", reply_markup=keyboard)
     data = load_data()
     data.setdefault("bot_messages", {})[key] = sent.message_id
     save_data(data)
@@ -224,6 +305,7 @@ async def process_any_message(message: Message):
         "total": parsed["total"],
         "message_id": message.message_id,
         "updated_at": datetime.now(TZ).isoformat(),
+        "countries": parsed["countries"],
     }
     save_data(data)
 
@@ -234,6 +316,41 @@ async def process_any_message(message: Message):
         logger.info(f"[OK] {parsed['name']} = {parsed['total']}")
     except Exception as e:
         logger.error(f"[ERR] {e}")
+
+
+# ── Callback кнопок ───────────────────────────────────
+
+@dp.callback_query(F.data.startswith("detail:"))
+async def on_detail_callback(callback: CallbackQuery):
+    name = callback.data.split(":", 1)[1]
+    data = load_data()
+    today = datetime.now(TZ).strftime("%d.%m.%y")
+
+    # Ищем последнюю дату где есть данные этого участника
+    days = data.get("days", {})
+    date = today
+    if today in days and name in days[today]:
+        date = today
+    else:
+        # Берём последнюю доступную дату
+        for d in sorted(days.keys(), reverse=True):
+            if name in days[d]:
+                date = d
+                break
+
+    day_data = days.get(date, {})
+    detail_text = format_member_detail(name, date, day_data)
+
+    try:
+        # Отправляем в личку
+        await bot.send_message(callback.from_user.id, detail_text, parse_mode="Markdown")
+        await callback.answer()
+    except TelegramBadRequest:
+        # Если бот не может написать в личку — показываем всплывающее уведомление
+        await callback.answer(
+            f"{name}: {day_data.get(name, {}).get('total', 0)}/{GOAL} рег. Напиши боту /start чтобы видеть детали.",
+            show_alert=True
+        )
 
 
 # ── Команды ──────────────────────────────────────────
