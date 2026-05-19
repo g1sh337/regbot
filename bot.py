@@ -32,24 +32,34 @@ def get_all_members() -> list:
     return list(MEMBERS) + [m for m in saved_members if m not in MEMBERS]
 
 
-def parse_country(line: str) -> str | None:
-    """Извлекает название страны из строки."""
-    # Убираем название продукта в начале и число в конце
-    # Пример: "мобилка казино россия 🇷🇺 - 11" -> "россия 🇷🇺"
+def parse_link_key(line: str) -> str | None:
+    """
+    Из строки вида 'мобилка казино(2) россия 🇷🇺 - 11'
+    возвращает ключ вида 'Россия 🇷🇺 (2)'
+    Если номера нет — 'Россия 🇷🇺 (1)'
+    """
     line = line.strip()
     # Убираем число в конце
     line = re.sub(r'\s*-\s*\d+\s*$', '', line)
-    # Убираем "мобилка казино(N)" или "мобилка казино" в начале
-    line = re.sub(r'^мобилка\s+казино(\(\d+\))?\s*', '', line, flags=re.IGNORECASE)
+
+    # Извлекаем номер ссылки (N) из названия продукта
+    num_match = re.search(r'казино\((\d+)\)', line, re.IGNORECASE)
+    num = int(num_match.group(1)) if num_match else 1
+
+    # Убираем "мобилка казино(N)" или "мобилка казино"
+    line = re.sub(r'мобилка\s+казино(\(\d+\))?\s*', '', line, flags=re.IGNORECASE)
     line = line.strip()
-    if line:
-        # Нормализуем: первая буква заглавная
-        return line[0].upper() + line[1:] if line else None
-    return None
+
+    if not line:
+        return None
+
+    # Первая буква заглавная
+    line = line[0].upper() + line[1:]
+    return f"{line} ({num})"
 
 
 def parse_message(text: str) -> dict:
-    result = {"name": None, "date": None, "total": 0, "lines": [], "countries": {}}
+    result = {"name": None, "date": None, "total": 0, "lines": [], "links": {}}
     lines = text.strip().split("\n")
 
     for line in lines:
@@ -67,10 +77,9 @@ def parse_message(text: str) -> dict:
             result["total"] += count
             result["lines"].append((line, count))
 
-            # Парсим страну
-            country = parse_country(line)
-            if country and count > 0:
-                result["countries"][country] = result["countries"].get(country, 0) + count
+            key = parse_link_key(line)
+            if key:
+                result["links"][key] = result["links"].get(key, 0) + count
 
     first_lines = "\n".join(lines[:3]).lower()
     for member in get_all_members():
@@ -94,16 +103,16 @@ def get_status_emoji(total: int, goal: int) -> str:
         return "🔴"
 
 
-def get_country_summary(day_data: dict) -> dict:
-    """Суммирует регистрации по странам за день."""
-    country_totals = {}
+def get_links_summary(day_data: dict) -> dict:
+    """Суммирует регистрации по ссылкам за день по всем участникам."""
+    link_totals = {}
     for member, info in day_data.items():
         if not isinstance(info, dict):
             continue
-        countries = info.get("countries", {})
-        for country, count in countries.items():
-            country_totals[country] = country_totals.get(country, 0) + count
-    return country_totals
+        links = info.get("links", {})
+        for key, count in links.items():
+            link_totals[key] = link_totals.get(key, 0) + count
+    return link_totals
 
 
 def format_summary(day_data: dict, date: str) -> str:
@@ -127,21 +136,28 @@ def format_summary(day_data: dict, date: str) -> str:
     lines.append("──────────────")
     lines.append(f"📈 Итого: {total_all}/{GOAL * len(members)}")
 
-    # Страны
-    country_totals = get_country_summary(day_data)
-    if country_totals:
+    # Ссылки
+    link_totals = get_links_summary(day_data)
+    if link_totals:
         lines.append("")
         lines.append("🌍 *По странам:*")
-        sorted_countries = sorted(country_totals.items(), key=lambda x: x[1], reverse=True)
-        for country, count in sorted_countries:
-            if count > 0:
-                lines.append(f"  {country} — {count}")
+        # Сортируем: сначала по названию страны, потом по номеру
+        def sort_key(item):
+            k = item[0]
+            # Извлекаем номер из конца "(N)"
+            m = re.search(r'\((\d+)\)$', k)
+            num = int(m.group(1)) if m else 1
+            name = re.sub(r'\s*\(\d+\)$', '', k)
+            return (name, num)
+
+        sorted_links = sorted(link_totals.items(), key=sort_key)
+        for key, count in sorted_links:
+            lines.append(f"  {key} — {count}")
 
     return "\n".join(lines)
 
 
 def make_member_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки для каждого участника."""
     members = get_all_members()
     buttons = []
     row = []
@@ -159,20 +175,26 @@ def make_member_keyboard() -> InlineKeyboardMarkup:
 
 
 def format_member_detail(name: str, date: str, day_data: dict) -> str:
-    """Детализация по странам для участника."""
     member_data = day_data.get(name, {})
-    countries = member_data.get("countries", {})
+    links = member_data.get("links", {})
     total = member_data.get("total", 0)
 
     lines = [f"📋 *{name}* — {date}", f"Итого: {total}/{GOAL}", ""]
 
-    if countries:
-        sorted_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)
-        for country, count in sorted_countries:
+    if links:
+        def sort_key(item):
+            k = item[0]
+            m = re.search(r'\((\d+)\)$', k)
+            num = int(m.group(1)) if m else 1
+            name_part = re.sub(r'\s*\(\d+\)$', '', k)
+            return (name_part, num)
+
+        sorted_links = sorted(links.items(), key=sort_key)
+        for key, count in sorted_links:
             emoji = "✅" if count > 0 else "➖"
-            lines.append(f"{emoji} {country} — {count}")
+            lines.append(f"{emoji} {key} — {count}")
     else:
-        lines.append("Нет данных по странам")
+        lines.append("Нет данных по ссылкам")
 
     return "\n".join(lines)
 
@@ -305,7 +327,7 @@ async def process_any_message(message: Message):
         "total": parsed["total"],
         "message_id": message.message_id,
         "updated_at": datetime.now(TZ).isoformat(),
-        "countries": parsed["countries"],
+        "links": parsed["links"],
     }
     save_data(data)
 
@@ -326,13 +348,9 @@ async def on_detail_callback(callback: CallbackQuery):
     data = load_data()
     today = datetime.now(TZ).strftime("%d.%m.%y")
 
-    # Ищем последнюю дату где есть данные этого участника
     days = data.get("days", {})
     date = today
-    if today in days and name in days[today]:
-        date = today
-    else:
-        # Берём последнюю доступную дату
+    if today not in days or name not in days.get(today, {}):
         for d in sorted(days.keys(), reverse=True):
             if name in days[d]:
                 date = d
@@ -342,13 +360,12 @@ async def on_detail_callback(callback: CallbackQuery):
     detail_text = format_member_detail(name, date, day_data)
 
     try:
-        # Отправляем в личку
         await bot.send_message(callback.from_user.id, detail_text, parse_mode="Markdown")
         await callback.answer()
     except TelegramBadRequest:
-        # Если бот не может написать в личку — показываем всплывающее уведомление
+        total = day_data.get(name, {}).get("total", 0)
         await callback.answer(
-            f"{name}: {day_data.get(name, {}).get('total', 0)}/{GOAL} рег. Напиши боту /start чтобы видеть детали.",
+            f"{name}: {total}/{GOAL} рег. Напиши боту /start чтобы видеть детали.",
             show_alert=True
         )
 
